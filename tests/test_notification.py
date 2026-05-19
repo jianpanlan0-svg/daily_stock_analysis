@@ -489,6 +489,46 @@ class TestNotificationServiceReportGeneration(unittest.TestCase):
         self.assertIn("*分析模型：gemini/gemini-2.5-flash*", out)
 
     @mock.patch("src.notification.get_config")
+    def test_generate_dashboard_report_summary_only_uses_quick_filter_table(self, mock_get_config: mock.MagicMock):
+        mock_get_config.return_value = _make_config(
+            report_renderer_enabled=False,
+            report_summary_only=True,
+        )
+        service = NotificationService()
+        focus = AnalysisResult(
+            code="AAPL",
+            name="Apple",
+            sentiment_score=72,
+            trend_prediction="看多",
+            operation_advice="持有",
+            analysis_summary="趋势保持偏强，回踩可继续观察。",
+            decision_type="hold",
+            dashboard={
+                "core_conclusion": {"one_sentence": "趋势保持偏强，回踩可继续观察。"},
+                "battle_plan": {"sniper_points": {"ideal_buy": "180-182", "stop_loss": "172"}},
+            },
+        )
+        avoid = AnalysisResult(
+            code="PDD",
+            name="拼多多",
+            sentiment_score=41,
+            trend_prediction="看空",
+            operation_advice="观望",
+            analysis_summary="弱势延续，暂不介入。",
+            decision_type="hold",
+        )
+
+        out = service.generate_dashboard_report([avoid, focus], report_date="2026-05-19")
+
+        self.assertIn("今日优先级", out)
+        self.assertIn("重点跟踪", out)
+        self.assertIn("暂不碰", out)
+        self.assertIn("| 标的 | 分组 | 操作 | 分数 | 趋势 | 买点/观察位 | 止损 | 一句话 |", out)
+        self.assertIn("180-182", out)
+        self.assertIn("172", out)
+        self.assertNotIn("### 📌 核心结论", out)
+
+    @mock.patch("src.notification.get_config")
     def test_generate_reports_hide_model_when_disabled(self, mock_get_config: mock.MagicMock):
         mock_get_config.return_value = _make_config(
             report_renderer_enabled=False,

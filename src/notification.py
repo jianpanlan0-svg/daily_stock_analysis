@@ -911,6 +911,162 @@ class NotificationService(
                 return value[len(prefix):]
         return value
 
+    @staticmethod
+    def _compact_text(value: Any, max_len: int = 36, default: str = "N/A") -> str:
+        """Normalize long fields for compact table display."""
+        if value is None:
+            return default
+        text = str(value).strip()
+        if not text:
+            return default
+        text = " ".join(text.replace("\r", " ").replace("\n", " ").split())
+        text = text.replace("|", "/")
+        if len(text) <= max_len:
+            return text
+        return text[: max_len - 1].rstrip() + "…"
+
+    @staticmethod
+    def _contains_any(text: str, keywords: List[str]) -> bool:
+        lowered = (text or "").lower()
+        return any(keyword.lower() in lowered for keyword in keywords)
+
+    def _priority_bucket(self, result: AnalysisResult, report_language: str) -> str:
+        """Split results into focus/watch/avoid buckets for quick screening."""
+        score = getattr(result, 'sentiment_score', 0) or 0
+        trend = localize_trend_prediction(getattr(result, 'trend_prediction', ''), report_language)
+        advice = localize_operation_advice(getattr(result, 'operation_advice', ''), report_language)
+        combined = f"{trend} {advice}"
+        bearish_words = [
+            "看空", "强烈看空", "卖出", "减仓", "回避", "bearish", "sell", "reduce", "avoid",
+        ]
+        positive_words = [
+            "看多", "震荡偏多", "买入", "加仓", "持有", "bullish", "buy", "accumulate", "hold",
+        ]
+        if score < 50 or self._contains_any(combined, bearish_words):
+            return "avoid"
+        if score >= 60 and self._contains_any(combined, positive_words):
+            return "focus"
+        return "watch"
+
+    @staticmethod
+    def _priority_labels(report_language: str) -> Dict[str, str]:
+        if report_language == "en":
+            return {
+                "focus": "Focus",
+                "watch": "Watch",
+                "avoid": "Avoid",
+                "risk": "Highest Risk",
+                "heading": "Quick Filter",
+                "empty": "None",
+                "ticker": "Ticker",
+                "bucket": "Bucket",
+                "action": "Action",
+                "score": "Score",
+                "trend": "Trend",
+                "entry": "Entry/Watch",
+                "stop": "Stop",
+                "take": "Takeaway",
+            }
+        return {
+            "focus": "重点跟踪",
+            "watch": "持有观察",
+            "avoid": "暂不碰",
+            "risk": "风险最高",
+            "heading": "今日优先级",
+            "empty": "无",
+            "ticker": "标的",
+            "bucket": "分组",
+            "action": "操作",
+            "score": "分数",
+            "trend": "趋势",
+            "entry": "买点/观察位",
+            "stop": "止损",
+            "take": "一句话",
+        }
+
+    def _format_priority_items(
+        self,
+        items: List[AnalysisResult],
+        report_language: str,
+        limit: int = 6,
+    ) -> str:
+        labels = self._priority_labels(report_language)
+        if not items:
+            return labels["empty"]
+        parts = [
+            f"{getattr(item, 'code', 'N/A')}({getattr(item, 'sentiment_score', 'N/A')})"
+            for item in items[:limit]
+        ]
+        if len(items) > limit:
+            suffix = f"+{len(items) - limit}只" if report_language != "en" else f"+{len(items) - limit} more"
+            parts.append(suffix)
+        separator = ", " if report_language == "en" else "、"
+        return separator.join(parts)
+
+    def _get_compact_summary_fields(
+        self,
+        result: AnalysisResult,
+        report_language: str,
+    ) -> Dict[str, str]:
+        dashboard = result.dashboard if hasattr(result, 'dashboard') and result.dashboard else {}
+        core = dashboard.get('core_conclusion', {}) if dashboard else {}
+        battle = dashboard.get('battle_plan', {}) if dashboard else {}
+        sniper = battle.get('sniper_points', {}) if battle else {}
+        ideal_buy = self._clean_sniper_value(sniper.get('ideal_buy') or sniper.get('secondary_buy'))
+        stop_loss = self._clean_sniper_value(sniper.get('stop_loss'))
+        one_sentence = core.get('one_sentence') or getattr(result, 'analysis_summary', '')
+        labels = self._priority_labels(report_language)
+        return {
+            "ticker": f"{self._get_display_name(result, report_language)}({result.code})",
+            "bucket": labels[self._priority_bucket(result, report_language)],
+            "action": localize_operation_advice(result.operation_advice, report_language),
+            "score": str(result.sentiment_score),
+            "trend": localize_trend_prediction(result.trend_prediction, report_language),
+            "entry": self._compact_text(ideal_buy, 24),
+            "stop": self._compact_text(stop_loss, 18),
+            "take": self._compact_text(one_sentence, 42),
+        }
+
+    def _append_quick_filter_summary(
+        self,
+        lines: List[str],
+        sorted_results: List[AnalysisResult],
+        labels: Dict[str, str],
+        report_language: str,
+    ) -> None:
+        priority_labels = self._priority_labels(report_language)
+        buckets = {"focus": [], "watch": [], "avoid": []}
+        for result in sorted_results:
+            buckets[self._priority_bucket(result, report_language)].append(result)
+        risk_pool = buckets["avoid"] if buckets["avoid"] else sorted_results
+        risk_items = sorted(risk_pool, key=lambda r: getattr(r, 'sentiment_score', 0) or 0)[:3]
+        lines.extend([
+            f"## 🔎 {priority_labels['heading']}",
+            "",
+            f"- **{priority_labels['focus']}**：{self._format_priority_items(buckets['focus'], report_language)}",
+            f"- **{priority_labels['watch']}**：{self._format_priority_items(buckets['watch'], report_language)}",
+            f"- **{priority_labels['avoid']}**：{self._format_priority_items(buckets['avoid'], report_language)}",
+            f"- **{priority_labels['risk']}**：{self._format_priority_items(risk_items, report_language, limit=3)}",
+            "",
+            f"## 📊 {labels['summary_heading']}",
+            "",
+            (
+                f"| {priority_labels['ticker']} | {priority_labels['bucket']} | "
+                f"{priority_labels['action']} | {priority_labels['score']} | "
+                f"{priority_labels['trend']} | {priority_labels['entry']} | "
+                f"{priority_labels['stop']} | {priority_labels['take']} |"
+            ),
+            "|---|---|---|---:|---|---|---|---|",
+        ])
+        for result in sorted_results:
+            fields = self._get_compact_summary_fields(result, report_language)
+            lines.append(
+                f"| {fields['ticker']} | {fields['bucket']} | {fields['action']} | "
+                f"{fields['score']} | {fields['trend']} | {fields['entry']} | "
+                f"{fields['stop']} | {fields['take']} |"
+            )
+        lines.extend(["", "---", ""])
+
     def _get_signal_level(self, result: AnalysisResult) -> tuple:
         """Get localized signal level and color based on operation advice."""
         return get_signal_level(
@@ -981,24 +1137,7 @@ class NotificationService(
 
         # === 新增：分析结果摘要 (Issue #112) ===
         if results:
-            report_lines.extend([
-                f"## 📊 {labels['summary_heading']}",
-                "",
-            ])
-            for r in sorted_results:
-                _, signal_emoji, _ = self._get_signal_level(r)
-                display_name = self._get_display_name(r, report_language)
-                report_lines.append(
-                    f"{signal_emoji} **{display_name}({r.code})**: "
-                    f"{localize_operation_advice(r.operation_advice, report_language)} | "
-                    f"{labels['score_label']} {r.sentiment_score} | "
-                    f"{localize_trend_prediction(r.trend_prediction, report_language)}"
-                )
-            report_lines.extend([
-                "",
-                "---",
-                "",
-            ])
+            self._append_quick_filter_summary(report_lines, sorted_results, labels, report_language)
 
         # 逐个股票的决策仪表盘（Issue #262: summary_only 时跳过详情）
         if not self._report_summary_only:
@@ -1269,17 +1408,7 @@ class NotificationService(
         
         # Issue #262: summary_only 时仅输出摘要列表
         if self._report_summary_only:
-            lines.append(f"**📊 {labels['summary_heading']}**")
-            lines.append("")
-            for r in sorted_results:
-                _, signal_emoji, _ = self._get_signal_level(r)
-                stock_name = self._get_display_name(r, report_language)
-                lines.append(
-                    f"{signal_emoji} **{stock_name}({r.code})**: "
-                    f"{localize_operation_advice(r.operation_advice, report_language)} | "
-                    f"{labels['score_label']} {r.sentiment_score} | "
-                    f"{localize_trend_prediction(r.trend_prediction, report_language)}"
-                )
+            self._append_quick_filter_summary(lines, sorted_results, labels, report_language)
         else:
             for result in sorted_results:
                 signal_text, signal_emoji, _ = self._get_signal_level(result)
