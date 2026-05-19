@@ -44,6 +44,7 @@ from src.report_language import (
     localize_trend_prediction,
     normalize_report_language,
 )
+from src.data.stock_mapping import STOCK_NAME_MAP
 from bot.models import BotMessage
 from src.utils.sanitize import sanitize_diagnostic_text
 from src.utils.data_processing import normalize_model_used
@@ -251,9 +252,32 @@ class NotificationService(
 
     def _get_display_name(self, result: AnalysisResult, language: Optional[str] = None) -> str:
         report_language = normalize_report_language(language or self._get_report_language(result))
+        mapped_name = self._get_mapped_stock_name(result.code)
+        if report_language != "en" and mapped_name:
+            return self._escape_md(mapped_name)
         return self._escape_md(
             get_localized_stock_name(result.name, result.code, report_language)
         )
+
+    @staticmethod
+    def _get_mapped_stock_name(code: Any) -> Optional[str]:
+        """Resolve a friendly stock name from local mappings, including HK-prefixed codes."""
+        raw_code = str(code or "").strip().upper()
+        if not raw_code:
+            return None
+
+        candidates = [raw_code]
+        if raw_code.startswith("HK"):
+            hk_code = raw_code[2:]
+            candidates.extend([hk_code, hk_code.zfill(5)])
+        elif raw_code.isdigit():
+            candidates.append(raw_code.zfill(5))
+
+        for candidate in dict.fromkeys(candidates):
+            mapped = STOCK_NAME_MAP.get(candidate)
+            if mapped:
+                return mapped
+        return None
 
     def _get_history_compare_context(self, results: List[AnalysisResult]) -> Dict[str, Any]:
         """Fetch and cache history comparison data for markdown rendering."""
@@ -994,7 +1018,7 @@ class NotificationService(
         if not items:
             return labels["empty"]
         parts = [
-            f"{getattr(item, 'code', 'N/A')}({getattr(item, 'sentiment_score', 'N/A')})"
+            f"{self._get_display_name(item, report_language)}({getattr(item, 'sentiment_score', 'N/A')})"
             for item in items[:limit]
         ]
         if len(items) > limit:
@@ -1017,7 +1041,7 @@ class NotificationService(
         one_sentence = core.get('one_sentence') or getattr(result, 'analysis_summary', '')
         labels = self._priority_labels(report_language)
         return {
-            "ticker": f"{self._get_display_name(result, report_language)}({result.code})",
+            "ticker": f"{self._get_display_name(result, report_language)}（{result.code}）",
             "bucket": labels[self._priority_bucket(result, report_language)],
             "action": localize_operation_advice(result.operation_advice, report_language),
             "score": str(result.sentiment_score),

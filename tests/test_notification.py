@@ -523,6 +523,8 @@ class TestNotificationServiceReportGeneration(unittest.TestCase):
         self.assertIn("今日优先级", out)
         self.assertIn("重点跟踪", out)
         self.assertIn("暂不碰", out)
+        self.assertIn("苹果（AAPL）", out)
+        self.assertIn("拼多多（PDD）", out)
         self.assertIn("| 标的 | 分组 | 操作 | 分数 | 趋势 | 买点/观察位 | 止损 | 一句话 |", out)
         self.assertIn("180-182", out)
         self.assertIn("172", out)
