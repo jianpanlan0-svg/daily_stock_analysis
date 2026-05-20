@@ -1091,6 +1091,420 @@ class NotificationService(
             )
         lines.extend(["", "---", ""])
 
+    def _digest_bucket(self, result: AnalysisResult, report_language: str) -> str:
+        """Split results into digest buckets for mobile-friendly summaries."""
+        score = getattr(result, 'sentiment_score', 0) or 0
+        trend = localize_trend_prediction(getattr(result, 'trend_prediction', ''), report_language)
+        advice = localize_operation_advice(getattr(result, 'operation_advice', ''), report_language)
+        combined = f"{trend} {advice}"
+        strong_bearish_words = [
+            "强烈看空", "卖出", "清仓", "止损",
+            "strong bearish", "strong sell", "sell",
+        ]
+        bearish_words = strong_bearish_words + [
+            "看空", "减仓", "观望", "回避",
+            "bearish", "reduce", "watch", "avoid",
+        ]
+        strong_positive_words = [
+            "强烈看多", "看多", "买入", "加仓",
+            "strong bullish", "bullish", "buy", "accumulate",
+        ]
+        if score < 40 or self._contains_any(combined, strong_bearish_words):
+            return "risk"
+        if score < 55 or self._contains_any(combined, bearish_words):
+            return "avoid"
+        if score >= 65 and self._contains_any(combined, strong_positive_words):
+            return "focus"
+        return "watch"
+
+    def _bucket_results_for_digest(
+        self,
+        results: List[AnalysisResult],
+        report_language: str,
+    ) -> Dict[str, List[AnalysisResult]]:
+        buckets: Dict[str, List[AnalysisResult]] = {
+            "focus": [],
+            "watch": [],
+            "avoid": [],
+            "risk": [],
+        }
+        for result in results:
+            buckets[self._digest_bucket(result, report_language)].append(result)
+        return buckets
+
+    @staticmethod
+    def _strip_markdown_text(text: Any) -> str:
+        if text is None:
+            return ""
+        normalized = str(text).strip()
+        if not normalized:
+            return ""
+        normalized = normalized.replace("**", "").replace("__", "")
+        normalized = normalized.replace("`", "")
+        normalized = normalized.replace("|", "/")
+        return " ".join(normalized.replace("\r", " ").replace("\n", " ").split())
+
+    def _extract_market_takeaway(self, market_report: str) -> str:
+        if not market_report:
+            return ""
+        for raw_line in market_report.splitlines():
+            line = raw_line.strip()
+            if not line:
+                continue
+            if line.startswith(("#", "---", "|", "*")):
+                continue
+            if line.startswith("> "):
+                line = line[2:].strip()
+            if line.startswith("- "):
+                line = line[2:].strip()
+            cleaned = self._compact_text(self._strip_markdown_text(line), 72, default="")
+            if cleaned:
+                return cleaned
+        return ""
+
+    def _build_digest_overview(
+        self,
+        buckets: Dict[str, List[AnalysisResult]],
+        report_language: str,
+        market_report: str = "",
+    ) -> str:
+        def _names(items: List[AnalysisResult], limit: int = 3) -> str:
+            names = [self._get_display_name(item, report_language) for item in items[:limit]]
+            separator = ", " if report_language == "en" else "、"
+            return separator.join(names)
+
+        parts: List[str] = []
+        market_takeaway = self._extract_market_takeaway(market_report)
+        if report_language == "en":
+            if market_takeaway:
+                parts.append(f"Market: {market_takeaway}")
+            if buckets["focus"]:
+                parts.append(f"Focus on {_names(buckets['focus'])}")
+            elif buckets["watch"]:
+                parts.append(f"Watch {_names(buckets['watch'])}")
+            else:
+                parts.append("No clear bullish setup today")
+            if buckets["risk"]:
+                parts.append(f"Avoid {_names(buckets['risk'], limit=2)}")
+            return ". ".join(parts) + "."
+
+        if market_takeaway:
+            parts.append(f"大盘：{market_takeaway}")
+        if buckets["focus"]:
+            parts.append(f"优先看{_names(buckets['focus'])}")
+        elif buckets["watch"]:
+            parts.append(f"先看{_names(buckets['watch'])}")
+        else:
+            parts.append("今天暂无明显强信号")
+        if buckets["risk"]:
+            parts.append(f"高风险回避{_names(buckets['risk'], limit=2)}")
+        return "；".join(parts) + "。"
+
+    def _select_digest_items(
+        self,
+        buckets: Dict[str, List[AnalysisResult]],
+        limit: int = 3,
+    ) -> List[AnalysisResult]:
+        selected: List[AnalysisResult] = []
+        for bucket_key in ("focus", "watch", "avoid", "risk"):
+            for item in buckets[bucket_key]:
+                selected.append(item)
+                if len(selected) >= limit:
+                    return selected
+        return selected
+
+    @staticmethod
+    def _digest_heading_labels(report_language: str) -> Dict[str, str]:
+        if report_language == "en":
+            return {
+                "title": "Watchlist Summary",
+                "overview": "Today's Conclusion",
+                "counts": "Bucket Counts",
+                "top": "Top Names",
+                "doc": "Full Doc",
+                "time": "Push Time",
+                "price": "Key Level",
+            }
+        return {
+            "title": "自选股摘要",
+            "overview": "今日结论",
+            "counts": "分组统计",
+            "top": "优先看前三",
+            "doc": "完整文档",
+            "time": "推送时间",
+            "price": "关键位",
+        }
+
+    def generate_merge_summary_report(
+        self,
+        results: List[AnalysisResult],
+        report_date: Optional[str] = None,
+        market_report: str = "",
+        doc_url: Optional[str] = None,
+    ) -> str:
+        """Generate the short summary used for Feishu group pushes."""
+        if report_date is None:
+            report_date = datetime.now().strftime('%Y-%m-%d')
+        report_language = self._get_report_language(results)
+        priority_labels = self._priority_labels(report_language)
+        digest_labels = self._digest_heading_labels(report_language)
+        sorted_results = sorted(results, key=lambda x: x.sentiment_score, reverse=True)
+        buckets = self._bucket_results_for_digest(sorted_results, report_language)
+        top_items = self._select_digest_items(buckets, limit=3)
+
+        lines = [
+            f"# 📌 {report_date} {digest_labels['title']}",
+            "",
+            f"- {digest_labels['time']}：{datetime.now().strftime('%Y-%m-%d %H:%M:%S')}",
+        ]
+        if doc_url:
+            lines.append(f"- {digest_labels['doc']}：{doc_url}")
+
+        overview = self._build_digest_overview(buckets, report_language, market_report)
+        if overview:
+            lines.extend([
+                "",
+                f"{digest_labels['overview']}：{overview}",
+            ])
+
+        lines.extend([
+            "",
+            f"## {digest_labels['counts']}",
+            "",
+            f"- {priority_labels['focus']}：{len(buckets['focus'])}",
+            f"- {priority_labels['watch']}：{len(buckets['watch'])}",
+            f"- {priority_labels['avoid']}：{len(buckets['avoid'])}",
+            f"- 高风险：{len(buckets['risk'])}" if report_language != "en" else f"- High Risk: {len(buckets['risk'])}",
+        ])
+
+        if top_items:
+            lines.extend([
+                "",
+                f"## {digest_labels['top']}",
+                "",
+            ])
+            for item in top_items:
+                fields = self._get_compact_summary_fields(item, report_language)
+                key_level = fields["entry"] if fields["entry"] != "N/A" else fields["stop"]
+                score_text = fields["score"] if report_language == "en" else f"{fields['score']}分"
+                line = (
+                    f"- {fields['ticker']} | {fields['bucket']} | {fields['action']} | "
+                    f"{score_text} | {digest_labels['price']} {key_level} | {fields['take']}"
+                )
+                lines.append(line)
+        elif report_language == "en":
+            lines.extend(["", "- No stock result available"])
+        else:
+            lines.extend(["", "- 本次未生成个股结果"])
+
+        models = self._collect_models_used(results)
+        if models:
+            lines.extend([
+                "",
+                f"*{get_report_labels(report_language)['analysis_model_label']}：{', '.join(models)}*",
+            ])
+        return "\n".join(lines)
+
+    def _append_doc_stock_section(
+        self,
+        lines: List[str],
+        result: AnalysisResult,
+        report_language: str,
+        history_rows: Optional[List[Dict[str, Any]]] = None,
+    ) -> None:
+        dashboard = result.dashboard if hasattr(result, 'dashboard') and result.dashboard else {}
+        core = dashboard.get('core_conclusion', {}) if dashboard else {}
+        battle = dashboard.get('battle_plan', {}) if dashboard else {}
+        intel = dashboard.get('intelligence', {}) if dashboard else {}
+        data_persp = dashboard.get('data_perspective', {}) if dashboard else {}
+        trend_data = data_persp.get('trend_status', {}) if data_persp else {}
+        price_data = data_persp.get('price_position', {}) if data_persp else {}
+        vol_data = data_persp.get('volume_analysis', {}) if data_persp else {}
+        chip_data = data_persp.get('chip_structure', {}) if data_persp else {}
+        sniper = battle.get('sniper_points', {}) if battle else {}
+        pos_advice = core.get('position_advice', {}) if core else {}
+        position = battle.get('position_strategy', {}) if battle else {}
+        checklist = battle.get('action_checklist', []) if battle else []
+
+        name = self._get_display_name(result, report_language)
+        bucket_labels = self._priority_labels(report_language)
+        bucket_key = self._digest_bucket(result, report_language)
+        bucket_name = "高风险" if report_language != "en" and bucket_key == "risk" else (
+            "High Risk" if report_language == "en" and bucket_key == "risk" else bucket_labels.get(bucket_key, bucket_key)
+        )
+        action = localize_operation_advice(result.operation_advice, report_language)
+        trend = localize_trend_prediction(result.trend_prediction, report_language)
+        one_sentence = core.get('one_sentence') or getattr(result, 'analysis_summary', '')
+        ideal_buy = self._clean_sniper_value(
+            sniper.get('ideal_buy') or sniper.get('secondary_buy') or price_data.get('support_level')
+        )
+        stop_loss = self._clean_sniper_value(sniper.get('stop_loss'))
+        take_profit = self._clean_sniper_value(sniper.get('take_profit'))
+        catalysts = intel.get('positive_catalysts', []) if intel else []
+        risk_alerts = intel.get('risk_alerts', []) if intel else []
+
+        lines.extend([
+            f"### {name}（{result.code}）",
+            f"- 分组：{bucket_name}",
+            f"- 结论：{action} | {result.sentiment_score}分 | {trend}",
+        ])
+        if one_sentence:
+            lines.append(f"- 一句话：{self._strip_markdown_text(one_sentence)}")
+        if ideal_buy and ideal_buy != "N/A":
+            lines.append(f"- 买点/观察位：{ideal_buy}")
+        if stop_loss and stop_loss != "N/A":
+            lines.append(f"- 止损：{stop_loss}")
+        if take_profit and take_profit != "N/A":
+            lines.append(f"- 止盈：{take_profit}")
+        if pos_advice.get('no_position'):
+            lines.append(f"- 无仓建议：{self._strip_markdown_text(pos_advice.get('no_position'))}")
+        if pos_advice.get('has_position'):
+            lines.append(f"- 持仓建议：{self._strip_markdown_text(pos_advice.get('has_position'))}")
+        if position.get('suggested_position'):
+            lines.append(f"- 建议仓位：{self._strip_markdown_text(position.get('suggested_position'))}")
+        if position.get('entry_plan'):
+            lines.append(f"- 执行计划：{self._strip_markdown_text(position.get('entry_plan'))}")
+        if position.get('risk_control'):
+            lines.append(f"- 风控：{self._strip_markdown_text(position.get('risk_control'))}")
+        if catalysts:
+            lines.append(
+                f"- 催化：{'；'.join(self._strip_markdown_text(item) for item in catalysts[:3] if item)}"
+            )
+        if intel.get('sentiment_summary'):
+            lines.append(f"- 情绪判断：{self._strip_markdown_text(intel.get('sentiment_summary'))}")
+        if intel.get('earnings_outlook'):
+            lines.append(f"- 业绩预期：{self._strip_markdown_text(intel.get('earnings_outlook'))}")
+        if risk_alerts:
+            lines.append(
+                f"- 风险：{'；'.join(self._strip_markdown_text(item) for item in risk_alerts[:3] if item)}"
+            )
+        elif getattr(result, 'risk_warning', None):
+            lines.append(f"- 风险：{self._strip_markdown_text(getattr(result, 'risk_warning', ''))}")
+        if intel.get('latest_news'):
+            lines.append(f"- 近期消息：{self._strip_markdown_text(intel.get('latest_news'))}")
+        elif getattr(result, 'news_summary', None):
+            lines.append(f"- 近期消息：{self._strip_markdown_text(getattr(result, 'news_summary', ''))}")
+        if trend_data or price_data:
+            trend_fragments = []
+            if trend_data.get('ma_alignment'):
+                trend_fragments.append(self._strip_markdown_text(trend_data.get('ma_alignment')))
+            if price_data.get('support_level'):
+                trend_fragments.append(f"支撑 {price_data.get('support_level')}")
+            if price_data.get('resistance_level'):
+                trend_fragments.append(f"压力 {price_data.get('resistance_level')}")
+            if trend_fragments:
+                lines.append(f"- 技术位：{' | '.join(trend_fragments)}")
+        if vol_data:
+            volume_ratio = vol_data.get('volume_ratio')
+            volume_meaning = self._strip_markdown_text(vol_data.get('volume_meaning'))
+            if volume_ratio or volume_meaning:
+                details = []
+                if volume_ratio:
+                    details.append(f"量比 {volume_ratio}")
+                if volume_meaning:
+                    details.append(volume_meaning)
+                lines.append(f"- 量能：{' | '.join(details)}")
+        if chip_data:
+            chip_fragments = [
+                str(chip_data.get('profit_ratio')) if chip_data.get('profit_ratio') else "",
+                str(chip_data.get('avg_cost')) if chip_data.get('avg_cost') else "",
+                str(chip_data.get('concentration')) if chip_data.get('concentration') else "",
+            ]
+            chip_fragments = [fragment for fragment in chip_fragments if fragment]
+            if chip_fragments:
+                lines.append(f"- 筹码：{' | '.join(chip_fragments)}")
+        if checklist:
+            checklist_items = [self._strip_markdown_text(item) for item in checklist[:3] if item]
+            if checklist_items:
+                lines.append(f"- 检查清单：{'；'.join(checklist_items)}")
+        if history_rows:
+            history_items = []
+            for item in history_rows[:3]:
+                created_at = item.get('created_at', '') or 'N/A'
+                history_items.append(
+                    f"{created_at[:16]} {item.get('sentiment_score', 'N/A')}分/"
+                    f"{localize_operation_advice(item.get('operation_advice', 'N/A'), report_language)}/"
+                    f"{localize_trend_prediction(item.get('trend_prediction', 'N/A'), report_language)}"
+                )
+            if history_items:
+                lines.append(f"- 近几次信号：{'；'.join(history_items)}")
+        lines.append("")
+
+    def generate_feishu_doc_report(
+        self,
+        results: List[AnalysisResult],
+        report_date: Optional[str] = None,
+        market_report: str = "",
+    ) -> str:
+        """Generate a doc-friendly full report without heavy tables."""
+        if report_date is None:
+            report_date = datetime.now().strftime('%Y-%m-%d')
+        report_language = self._get_report_language(results)
+        sorted_results = sorted(results, key=lambda x: x.sentiment_score, reverse=True)
+        buckets = self._bucket_results_for_digest(sorted_results, report_language)
+        bucket_labels = self._priority_labels(report_language)
+        history_by_code = self._get_history_compare_context(results).get("history_by_code", {}) if results else {}
+
+        lines = [
+            f"# {report_date} 复盘文档" if report_language != "en" else f"# {report_date} Review Doc",
+            "",
+            "## 今日总览" if report_language != "en" else "## Daily Overview",
+            "",
+            f"- 推送时间：{datetime.now().strftime('%Y-%m-%d %H:%M:%S')}" if report_language != "en"
+            else f"- Push Time: {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}",
+        ]
+
+        overview = self._build_digest_overview(buckets, report_language, market_report)
+        if overview:
+            lines.append(
+                f"- 今日结论：{overview}" if report_language != "en" else f"- Conclusion: {overview}"
+            )
+
+        lines.extend([
+            f"- {bucket_labels['focus']}：{len(buckets['focus'])}",
+            f"- {bucket_labels['watch']}：{len(buckets['watch'])}",
+            f"- {bucket_labels['avoid']}：{len(buckets['avoid'])}",
+            f"- 高风险：{len(buckets['risk'])}" if report_language != "en" else f"- High Risk: {len(buckets['risk'])}",
+        ])
+
+        if market_report:
+            lines.extend([
+                "",
+                "## 大盘复盘" if report_language != "en" else "## Market Review",
+                "",
+                market_report.strip(),
+            ])
+
+        for bucket_key in ("focus", "watch", "avoid", "risk"):
+            items = buckets[bucket_key]
+            if not items:
+                continue
+            section_title = (
+                "高风险"
+                if report_language != "en" and bucket_key == "risk"
+                else "High Risk"
+                if report_language == "en" and bucket_key == "risk"
+                else bucket_labels[bucket_key]
+            )
+            lines.extend(["", f"## {section_title}", ""])
+            for result in items:
+                self._append_doc_stock_section(
+                    lines,
+                    result,
+                    report_language,
+                    history_rows=history_by_code.get(result.code, []),
+                )
+
+        models = self._collect_models_used(results)
+        if models:
+            lines.extend([
+                "",
+                "## 附注" if report_language != "en" else "## Notes",
+                "",
+                f"- {get_report_labels(report_language)['analysis_model_label']}：{', '.join(models)}",
+            ])
+        return "\n".join(lines)
+
     def _get_signal_level(self, result: AnalysisResult) -> tuple:
         """Get localized signal level and color based on operation advice."""
         return get_signal_level(

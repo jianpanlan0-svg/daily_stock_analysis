@@ -15,6 +15,7 @@ from tests.litellm_stub import ensure_litellm_stub
 ensure_litellm_stub()
 
 import main
+from src.analyzer import AnalysisResult
 from src.config import Config
 
 
@@ -494,6 +495,53 @@ class MainScheduleModeTestCase(unittest.TestCase):
 
         pipeline.run.assert_called_once()
         run_market_review.assert_not_called()
+
+    def test_run_full_analysis_sends_digest_when_feishu_doc_created(self) -> None:
+        args = self._make_args()
+        config = self._make_config(
+            trading_day_check_enabled=False,
+            market_review_enabled=True,
+            no_market_review=False,
+            single_stock_notify=False,
+            merge_email_notification=True,
+            analysis_delay=0,
+            report_type="full",
+            database_path=str(Path(self.temp_dir.name) / "stock_analysis.db"),
+        )
+        result = AnalysisResult(
+            code="NVDA",
+            name="NVIDIA",
+            sentiment_score=82,
+            trend_prediction="看多",
+            operation_advice="买入",
+            analysis_summary="趋势继续走强。",
+            decision_type="buy",
+        )
+        pipeline = MagicMock()
+        pipeline.run.return_value = [result]
+        pipeline.notifier.generate_aggregate_report.return_value = "dashboard report"
+        pipeline.notifier.generate_feishu_doc_report.return_value = "doc report"
+        pipeline.notifier.generate_merge_summary_report.return_value = "digest report"
+        pipeline.notifier.is_available.return_value = True
+        pipeline.notifier.send.return_value = True
+
+        feishu_doc = MagicMock()
+        feishu_doc.is_configured.return_value = True
+        feishu_doc.create_daily_doc.return_value = "https://feishu.cn/docx/mock"
+
+        with patch("src.core.pipeline.StockAnalysisPipeline", return_value=pipeline), \
+             patch("main._run_market_review_with_shared_lock", return_value="market review"), \
+             patch("src.core.market_review.run_market_review"), \
+             patch("src.feishu_doc.FeishuDocManager", return_value=feishu_doc):
+            main.run_full_analysis(config, args, [])
+
+        pipeline.notifier.generate_feishu_doc_report.assert_called_once()
+        pipeline.notifier.generate_merge_summary_report.assert_called_once()
+        pipeline.notifier.send.assert_called_once_with(
+            "digest report",
+            email_send_to_all=True,
+            route_type="report",
+        )
 
     def test_market_review_mode_uses_shared_runtime_assembly(self) -> None:
         args = self._make_args(market_review=True)

@@ -531,6 +531,104 @@ class TestNotificationServiceReportGeneration(unittest.TestCase):
         self.assertNotIn("### 📌 核心结论", out)
 
     @mock.patch("src.notification.get_config")
+    def test_generate_merge_summary_report_includes_doc_link_and_names(self, mock_get_config: mock.MagicMock):
+        mock_get_config.return_value = _make_config(report_renderer_enabled=False)
+        service = NotificationService()
+        focus = AnalysisResult(
+            code="NVDA",
+            name="NVIDIA",
+            sentiment_score=82,
+            trend_prediction="看多",
+            operation_advice="买入",
+            analysis_summary="趋势继续走强，优先关注回踩机会。",
+            decision_type="buy",
+            dashboard={
+                "core_conclusion": {"one_sentence": "趋势继续走强，优先关注回踩机会。"},
+                "battle_plan": {"sniper_points": {"ideal_buy": "1190", "stop_loss": "1155"}},
+            },
+        )
+        watch = AnalysisResult(
+            code="AAPL",
+            name="Apple",
+            sentiment_score=64,
+            trend_prediction="震荡偏多",
+            operation_advice="持有",
+            analysis_summary="等回踩确认，不急着追。",
+            decision_type="hold",
+        )
+        risk = AnalysisResult(
+            code="PDD",
+            name="拼多多",
+            sentiment_score=35,
+            trend_prediction="看空",
+            operation_advice="卖出",
+            analysis_summary="破位风险高，先回避。",
+            decision_type="sell",
+        )
+
+        out = service.generate_merge_summary_report(
+            [risk, watch, focus],
+            report_date="2026-05-19",
+            market_report="> 指数震荡，科技相对偏强",
+            doc_url="https://feishu.cn/docx/mock",
+        )
+
+        self.assertIn("完整文档：https://feishu.cn/docx/mock", out)
+        self.assertIn("今日结论：大盘：指数震荡，科技相对偏强", out)
+        self.assertIn("英伟达（NVDA）", out)
+        self.assertIn("苹果（AAPL）", out)
+        self.assertIn("拼多多（PDD）", out)
+        self.assertIn("高风险：1", out)
+
+    @mock.patch("src.notification.get_config")
+    def test_generate_feishu_doc_report_groups_stocks_without_tables(self, mock_get_config: mock.MagicMock):
+        mock_get_config.return_value = _make_config(report_renderer_enabled=False, report_history_compare_n=0)
+        service = NotificationService()
+        result = AnalysisResult(
+            code="TSM",
+            name="TSMC",
+            sentiment_score=76,
+            trend_prediction="看多",
+            operation_advice="买入",
+            analysis_summary="趋势和催化都在，回踩再看。",
+            decision_type="buy",
+            dashboard={
+                "core_conclusion": {
+                    "one_sentence": "趋势和催化都在，回踩再看。",
+                    "position_advice": {
+                        "no_position": "等回踩分批介入",
+                        "has_position": "继续拿，跌破止损再走",
+                    },
+                },
+                "battle_plan": {
+                    "sniper_points": {
+                        "ideal_buy": "168",
+                        "stop_loss": "162",
+                        "take_profit": "178",
+                    },
+                    "position_strategy": {
+                        "suggested_position": "3成",
+                        "entry_plan": "回踩 MA5 再上",
+                        "risk_control": "跌破 162 减仓",
+                    },
+                },
+                "intelligence": {
+                    "positive_catalysts": ["AI 需求继续扩张"],
+                    "risk_alerts": ["短线涨幅偏大"],
+                },
+            },
+        )
+
+        out = service.generate_feishu_doc_report([result], report_date="2026-05-19")
+
+        self.assertIn("## 今日总览", out)
+        self.assertIn("## 重点跟踪", out)
+        self.assertIn("### 台积电（TSM）", out)
+        self.assertIn("- 买点/观察位：168", out)
+        self.assertIn("- 风险：短线涨幅偏大", out)
+        self.assertNotIn("| 标的 |", out)
+
+    @mock.patch("src.notification.get_config")
     def test_generate_reports_hide_model_when_disabled(self, mock_get_config: mock.MagicMock):
         mock_get_config.return_value = _make_config(
             report_renderer_enabled=False,

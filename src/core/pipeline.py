@@ -1973,13 +1973,62 @@ class StockAnalysisPipeline:
                         logger.info(noise_decision.message)
                         return
 
+                # 飞书群只发短摘要；完整版优先写入飞书云文档并在摘要里附链接。
+                feishu_report = report
+                if NotificationChannel.FEISHU in channels:
+                    doc_url = None
+                    now_cn = datetime.now(timezone(timedelta(hours=8)))
+                    report_date = now_cn.strftime('%Y-%m-%d')
+                    try:
+                        from src.feishu_doc import FeishuDocManager
+
+                        feishu_doc = FeishuDocManager()
+                        if feishu_doc.is_configured():
+                            logger.info("正在创建飞书云文档...")
+                            doc_generator = getattr(self.notifier, "generate_feishu_doc_report", None)
+                            doc_content = (
+                                doc_generator(results, report_date=report_date)
+                                if callable(doc_generator)
+                                else report
+                            )
+                            doc_title = f"{now_cn.strftime('%Y-%m-%d %H:%M')} 个股分析报告"
+                            doc_url = feishu_doc.create_daily_doc(doc_title, doc_content)
+                            if doc_url:
+                                logger.info(f"飞书云文档创建成功: {doc_url}")
+                            else:
+                                logger.warning("飞书云文档未创建成功，将只发送飞书短摘要")
+                        else:
+                            logger.warning("飞书云文档配置缺失，将只发送飞书短摘要")
+                    except Exception as e:
+                        logger.error(f"飞书云文档生成失败，将只发送飞书短摘要: {e}")
+
+                    summary_generator = getattr(self.notifier, "generate_merge_summary_report", None)
+                    if callable(summary_generator):
+                        feishu_report = summary_generator(
+                            results,
+                            report_date=report_date,
+                            doc_url=doc_url,
+                        )
+                        if not doc_url:
+                            feishu_report = (
+                                f"{feishu_report}\n\n"
+                                "- 完整文档：未创建（请检查飞书文档权限和 "
+                                "FEISHU_APP_ID/FEISHU_APP_SECRET/FEISHU_FOLDER_TOKEN）"
+                            )
+                    else:
+                        logger.warning("未找到飞书摘要生成器，将回退发送完整报告")
+
                 # Issue #455: Markdown 转图片（与 notification.send 逻辑一致）
                 from src.md2img import markdown_to_image
 
                 channels_needing_image = {
                     ch for ch in channels
                     if ch.value in self.notifier._markdown_to_image_channels
-                    and ch not in {NotificationChannel.NTFY, NotificationChannel.GOTIFY}
+                    and ch not in {
+                        NotificationChannel.FEISHU,
+                        NotificationChannel.NTFY,
+                        NotificationChannel.GOTIFY,
+                    }
                 }
                 non_wechat_channels_needing_image = {
                     ch for ch in channels_needing_image if ch != NotificationChannel.WECHAT
@@ -2064,7 +2113,7 @@ class StockAnalysisPipeline:
                     if channel == NotificationChannel.FEISHU:
                         non_wechat_success = _send_channel_safely(
                             channel.value,
-                            lambda: self.notifier.send_to_feishu(report),
+                            lambda: self.notifier.send_to_feishu(feishu_report),
                         ) or non_wechat_success
                     elif channel == NotificationChannel.TELEGRAM:
                         def _send_telegram_report() -> bool:

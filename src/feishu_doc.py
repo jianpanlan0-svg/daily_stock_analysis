@@ -2,6 +2,7 @@
 # -*- coding: utf-8 -*-
 import logging
 import json
+import re
 import lark_oapi as lark
 from lark_oapi.api.docx.v1 import *
 from typing import List, Dict, Any, Optional
@@ -110,20 +111,24 @@ class FeishuDocManager:
             if not line:
                 continue
 
+            # 跳过 markdown 表格分隔行
+            if re.match(r'^\|?\s*[:-]+\s*(\|\s*[:-]+\s*)+\|?$', line):
+                continue
+
             # 默认普通文本 (Text = 2)
             block_type = 2
-            text_content = line
+            text_content = self._normalize_markdown_line(line)
 
             # 识别标题
             if line.startswith('# '):
                 block_type = 3  # H1
-                text_content = line[2:]
+                text_content = self._normalize_markdown_line(line[2:])
             elif line.startswith('## '):
                 block_type = 4  # H2
-                text_content = line[3:]
+                text_content = self._normalize_markdown_line(line[3:])
             elif line.startswith('### '):
                 block_type = 5  # H3
-                text_content = line[4:]
+                text_content = self._normalize_markdown_line(line[4:])
             elif line.startswith('---'):
                 # 分割线
                 blocks.append(Block.builder()
@@ -163,3 +168,25 @@ class FeishuDocManager:
             blocks.append(block_builder.build())
 
         return blocks
+
+    @staticmethod
+    def _normalize_markdown_line(line: str) -> str:
+        """将常见 Markdown 行转成更适合飞书文档的纯文本。"""
+        text = (line or "").strip()
+        if not text:
+            return ""
+
+        if text.startswith("> "):
+            text = text[2:].strip()
+        elif text.startswith("- "):
+            text = f"• {text[2:].strip()}"
+        elif text.startswith("* "):
+            text = f"• {text[2:].strip()}"
+        elif text.startswith("|"):
+            cells = [cell.strip() for cell in text.strip("|").split("|") if cell.strip()]
+            text = " | ".join(cells)
+
+        text = text.replace("**", "").replace("__", "")
+        text = text.replace("`", "")
+        text = re.sub(r'\[(.*?)\]\((.*?)\)', r'\1: \2', text)
+        return " ".join(text.replace("\r", " ").replace("\n", " ").split())
