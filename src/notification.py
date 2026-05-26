@@ -1220,7 +1220,7 @@ class NotificationService(
                 "title": "Watchlist Summary",
                 "overview": "Today's Conclusion",
                 "counts": "Bucket Counts",
-                "top": "Top Names",
+                "top": "Stock Notes",
                 "doc": "Full Doc",
                 "time": "Push Time",
                 "price": "Key Level",
@@ -1229,7 +1229,7 @@ class NotificationService(
             "title": "自选股摘要",
             "overview": "今日结论",
             "counts": "分组统计",
-            "top": "优先看前三",
+            "top": "个股简析",
             "doc": "完整文档",
             "time": "推送时间",
             "price": "关键位",
@@ -1250,7 +1250,7 @@ class NotificationService(
         digest_labels = self._digest_heading_labels(report_language)
         sorted_results = sorted(results, key=lambda x: x.sentiment_score, reverse=True)
         buckets = self._bucket_results_for_digest(sorted_results, report_language)
-        top_items = self._select_digest_items(buckets, limit=3)
+        digest_items = self._select_digest_items(buckets, limit=len(sorted_results))
 
         lines = [
             f"# 📌 {report_date} {digest_labels['title']}",
@@ -1277,19 +1277,19 @@ class NotificationService(
             f"- 高风险：{len(buckets['risk'])}" if report_language != "en" else f"- High Risk: {len(buckets['risk'])}",
         ])
 
-        if top_items:
+        if digest_items:
             lines.extend([
                 "",
                 f"## {digest_labels['top']}",
                 "",
             ])
-            for item in top_items:
+            for item in digest_items:
                 fields = self._get_compact_summary_fields(item, report_language)
                 key_level = fields["entry"] if fields["entry"] != "N/A" else fields["stop"]
                 score_text = fields["score"] if report_language == "en" else f"{fields['score']}分"
                 line = (
-                    f"- {fields['ticker']} | {fields['bucket']} | {fields['action']} | "
-                    f"{score_text} | {digest_labels['price']} {key_level} | {fields['take']}"
+                    f"- {fields['ticker']} | {fields['action']} | {score_text} | "
+                    f"{fields['trend']} | {digest_labels['price']} {key_level} | {fields['take']}"
                 )
                 lines.append(line)
         elif report_language == "en":

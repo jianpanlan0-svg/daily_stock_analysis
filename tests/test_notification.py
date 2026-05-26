@@ -565,9 +565,18 @@ class TestNotificationServiceReportGeneration(unittest.TestCase):
             analysis_summary="破位风险高，先回避。",
             decision_type="sell",
         )
+        avoid = AnalysisResult(
+            code="BABA",
+            name="阿里巴巴",
+            sentiment_score=45,
+            trend_prediction="震荡",
+            operation_advice="观望",
+            analysis_summary="趋势未修复，等放量站回均线。",
+            decision_type="hold",
+        )
 
         out = service.generate_merge_summary_report(
-            [risk, watch, focus],
+            [risk, watch, focus, avoid],
             report_date="2026-05-19",
             market_report="> 指数震荡，科技相对偏强",
             doc_url="https://feishu.cn/docx/mock",
@@ -575,9 +584,12 @@ class TestNotificationServiceReportGeneration(unittest.TestCase):
 
         self.assertIn("完整文档：https://feishu.cn/docx/mock", out)
         self.assertIn("今日结论：大盘：指数震荡，科技相对偏强", out)
+        self.assertIn("个股简析", out)
         self.assertIn("英伟达（NVDA）", out)
         self.assertIn("苹果（AAPL）", out)
         self.assertIn("拼多多（PDD）", out)
+        self.assertIn("阿里巴巴（BABA）", out)
+        self.assertIn("趋势未修复，等放量站回均线", out)
         self.assertIn("高风险：1", out)
 
     @mock.patch("src.notification.get_config")
