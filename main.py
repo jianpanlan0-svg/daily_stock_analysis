@@ -543,7 +543,7 @@ def run_full_analysis(
                 merge_notification=merge_notification,
                 override_region=effective_region,
             )
-            # 如果有结果，赋值给 market_report 用于后续飞书文档生成
+            # 如果有结果，赋值给 market_report 用于后续合并摘要
             if review_result:
                 market_report = review_result
 
@@ -560,53 +560,26 @@ def run_full_analysis(
                 parts.append(f"# 🚀 个股决策仪表盘\n\n{dashboard_content}")
             combined_content = "\n\n---\n\n".join(parts)
 
-        # === 生成飞书云文档（先建文档，后决定群里发摘要还是完整版） ===
-        doc_url = None
         tz_cn = timezone(timedelta(hours=8))
         now = datetime.now(tz_cn)
-        try:
-            from src.feishu_doc import FeishuDocManager
-
-            feishu_doc = FeishuDocManager()
-            if feishu_doc.is_configured() and (results or market_report):
-                logger.info("正在创建飞书云文档...")
-
-                doc_title = f"{now.strftime('%Y-%m-%d %H:%M')} 大盘复盘"
-                doc_content = pipeline.notifier.generate_feishu_doc_report(
-                    results,
-                    report_date=now.strftime('%Y-%m-%d'),
-                    market_report=market_report,
-                )
-                doc_url = feishu_doc.create_daily_doc(doc_title, doc_content)
-                if doc_url:
-                    logger.info(f"飞书云文档创建成功: {doc_url}")
-
-        except Exception as e:
-            logger.error(f"飞书文档生成失败: {e}")
 
         # Issue #190: 合并推送（个股+大盘复盘）
         if merge_notification and combined_content and not args.no_notify:
-            notify_content = combined_content
-            if doc_url:
-                notify_content = pipeline.notifier.generate_merge_summary_report(
+            summary_generator = getattr(pipeline.notifier, "generate_merge_summary_report", None)
+            notify_content = (
+                summary_generator(
                     results,
                     report_date=now.strftime('%Y-%m-%d'),
                     market_report=market_report,
-                    doc_url=doc_url,
                 )
+                if callable(summary_generator)
+                else combined_content
+            )
             if pipeline.notifier.is_available():
                 if pipeline.notifier.send(notify_content, email_send_to_all=True, route_type="report"):
-                    if doc_url:
-                        logger.info("已发送飞书摘要并附带文档链接")
-                    else:
-                        logger.info("已合并推送（个股+大盘复盘）")
+                    logger.info("已发送合并摘要（个股+大盘复盘）")
                 else:
                     logger.warning("合并推送失败")
-        elif doc_url and not args.no_notify:
-            pipeline.notifier.send(
-                f"[{now.strftime('%Y-%m-%d %H:%M')}] 复盘文档：{doc_url}",
-                route_type="report",
-            )
 
         # 输出摘要
         if results:

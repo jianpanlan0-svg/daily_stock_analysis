@@ -6,7 +6,7 @@ Regression tests for pipeline email image routing with stock email groups.
 import os
 import sys
 import unittest
-from types import ModuleType, SimpleNamespace
+from types import SimpleNamespace
 from unittest.mock import MagicMock, patch
 
 sys.path.insert(0, os.path.abspath(os.path.join(os.path.dirname(__file__), "..")))
@@ -317,54 +317,32 @@ class TestPipelineReportRouteFiltering(unittest.TestCase):
         pipeline.notifier.record_noise_control.assert_not_called()
         pipeline.notifier.release_noise_control.assert_called_once()
 
-    def test_feishu_route_sends_short_digest_with_doc_link(self):
+    def test_feishu_route_sends_short_digest_without_doc_link(self):
         pipeline = StockAnalysisPipeline.__new__(StockAnalysisPipeline)
         pipeline.notifier = _FakeRoutedNotifier([NotificationChannel.FEISHU])
         pipeline.config = SimpleNamespace(stock_email_groups=[])
         results = [SimpleNamespace(code="000001")]
 
-        feishu_doc = MagicMock()
-        feishu_doc.is_configured.return_value = True
-        feishu_doc.create_daily_doc.return_value = "https://feishu.cn/docx/mock"
-        fake_module = ModuleType("src.feishu_doc")
-        fake_module.FeishuDocManager = MagicMock(return_value=feishu_doc)
+        pipeline._send_notifications(results, ReportType.SIMPLE)
 
-        with patch.dict(sys.modules, {"src.feishu_doc": fake_module}):
-            pipeline._send_notifications(results, ReportType.SIMPLE)
-
-        feishu_doc.create_daily_doc.assert_called_once()
-        self.assertEqual(feishu_doc.create_daily_doc.call_args.args[1], "doc report")
-        pipeline.notifier.generate_feishu_doc_report.assert_called_once()
+        pipeline.notifier.generate_feishu_doc_report.assert_not_called()
         pipeline.notifier.generate_merge_summary_report.assert_called_once()
-        self.assertEqual(
-            pipeline.notifier.generate_merge_summary_report.call_args.kwargs["doc_url"],
-            "https://feishu.cn/docx/mock",
-        )
+        self.assertNotIn("doc_url", pipeline.notifier.generate_merge_summary_report.call_args.kwargs)
         pipeline.notifier.send_to_feishu.assert_called_once_with("digest report")
 
-    def test_feishu_route_keeps_short_digest_when_doc_unconfigured(self):
+    def test_feishu_route_uses_brief_report_when_digest_generator_missing(self):
         pipeline = StockAnalysisPipeline.__new__(StockAnalysisPipeline)
         pipeline.notifier = _FakeRoutedNotifier([NotificationChannel.FEISHU])
+        delattr(pipeline.notifier, "generate_merge_summary_report")
+        pipeline.notifier.generate_brief_report = MagicMock(return_value="brief report")
         pipeline.config = SimpleNamespace(stock_email_groups=[])
         results = [SimpleNamespace(code="000001")]
 
-        feishu_doc = MagicMock()
-        feishu_doc.is_configured.return_value = False
-        fake_module = ModuleType("src.feishu_doc")
-        fake_module.FeishuDocManager = MagicMock(return_value=feishu_doc)
+        pipeline._send_notifications(results, ReportType.SIMPLE)
 
-        with patch.dict(sys.modules, {"src.feishu_doc": fake_module}):
-            pipeline._send_notifications(results, ReportType.SIMPLE)
-
-        feishu_doc.create_daily_doc.assert_not_called()
-        pipeline.notifier.generate_merge_summary_report.assert_called_once()
-        self.assertIsNone(
-            pipeline.notifier.generate_merge_summary_report.call_args.kwargs["doc_url"]
-        )
-        sent_content = pipeline.notifier.send_to_feishu.call_args.args[0]
-        self.assertTrue(sent_content.startswith("digest report"))
-        self.assertIn("完整文档：未创建", sent_content)
-        self.assertNotEqual(sent_content, "report:000001")
+        pipeline.notifier.generate_feishu_doc_report.assert_not_called()
+        pipeline.notifier.generate_brief_report.assert_called_once_with(results)
+        pipeline.notifier.send_to_feishu.assert_called_once_with("brief report")
 
     def test_channel_exception_does_not_skip_later_channel_and_records_noise(self):
         pipeline = StockAnalysisPipeline.__new__(StockAnalysisPipeline)

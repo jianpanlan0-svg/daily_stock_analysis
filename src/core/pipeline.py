@@ -1973,48 +1973,19 @@ class StockAnalysisPipeline:
                         logger.info(noise_decision.message)
                         return
 
-                # 飞书群只发短摘要；完整版优先写入飞书云文档并在摘要里附链接。
+                # 飞书群只发短摘要，不创建云文档，避免文档权限/写入失败影响推送。
                 feishu_report = report
                 if NotificationChannel.FEISHU in channels:
-                    doc_url = None
                     now_cn = datetime.now(timezone(timedelta(hours=8)))
                     report_date = now_cn.strftime('%Y-%m-%d')
-                    try:
-                        from src.feishu_doc import FeishuDocManager
-
-                        feishu_doc = FeishuDocManager()
-                        if feishu_doc.is_configured():
-                            logger.info("正在创建飞书云文档...")
-                            doc_generator = getattr(self.notifier, "generate_feishu_doc_report", None)
-                            doc_content = (
-                                doc_generator(results, report_date=report_date)
-                                if callable(doc_generator)
-                                else report
-                            )
-                            doc_title = f"{now_cn.strftime('%Y-%m-%d %H:%M')} 个股分析报告"
-                            doc_url = feishu_doc.create_daily_doc(doc_title, doc_content)
-                            if doc_url:
-                                logger.info(f"飞书云文档创建成功: {doc_url}")
-                            else:
-                                logger.warning("飞书云文档未创建成功，将只发送飞书短摘要")
-                        else:
-                            logger.warning("飞书云文档配置缺失，将只发送飞书短摘要")
-                    except Exception as e:
-                        logger.error(f"飞书云文档生成失败，将只发送飞书短摘要: {e}")
-
                     summary_generator = getattr(self.notifier, "generate_merge_summary_report", None)
                     if callable(summary_generator):
                         feishu_report = summary_generator(
                             results,
                             report_date=report_date,
-                            doc_url=doc_url,
                         )
-                        if not doc_url:
-                            feishu_report = (
-                                f"{feishu_report}\n\n"
-                                "- 完整文档：未创建（请检查飞书文档权限和 "
-                                "FEISHU_APP_ID/FEISHU_APP_SECRET/FEISHU_FOLDER_TOKEN）"
-                            )
+                    elif hasattr(self.notifier, "generate_brief_report"):
+                        feishu_report = self.notifier.generate_brief_report(results)
                     else:
                         logger.warning("未找到飞书摘要生成器，将回退发送完整报告")
 

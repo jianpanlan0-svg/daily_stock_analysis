@@ -496,7 +496,7 @@ class MainScheduleModeTestCase(unittest.TestCase):
         pipeline.run.assert_called_once()
         run_market_review.assert_not_called()
 
-    def test_run_full_analysis_sends_digest_when_feishu_doc_created(self) -> None:
+    def test_run_full_analysis_sends_digest_without_feishu_doc(self) -> None:
         args = self._make_args()
         config = self._make_config(
             trading_day_check_enabled=False,
@@ -520,23 +520,17 @@ class MainScheduleModeTestCase(unittest.TestCase):
         pipeline = MagicMock()
         pipeline.run.return_value = [result]
         pipeline.notifier.generate_aggregate_report.return_value = "dashboard report"
-        pipeline.notifier.generate_feishu_doc_report.return_value = "doc report"
         pipeline.notifier.generate_merge_summary_report.return_value = "digest report"
         pipeline.notifier.is_available.return_value = True
         pipeline.notifier.send.return_value = True
 
-        feishu_doc = MagicMock()
-        feishu_doc.is_configured.return_value = True
-        feishu_doc.create_daily_doc.return_value = "https://feishu.cn/docx/mock"
-
         with patch("src.core.pipeline.StockAnalysisPipeline", return_value=pipeline), \
              patch("main._run_market_review_with_shared_lock", return_value="market review"), \
-             patch("src.core.market_review.run_market_review"), \
-             patch("src.feishu_doc.FeishuDocManager", return_value=feishu_doc):
+             patch("src.core.market_review.run_market_review"):
             main.run_full_analysis(config, args, [])
 
-        pipeline.notifier.generate_feishu_doc_report.assert_called_once()
         pipeline.notifier.generate_merge_summary_report.assert_called_once()
+        self.assertNotIn("doc_url", pipeline.notifier.generate_merge_summary_report.call_args.kwargs)
         pipeline.notifier.send.assert_called_once_with(
             "digest report",
             email_send_to_all=True,
